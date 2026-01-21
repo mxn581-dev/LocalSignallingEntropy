@@ -22,7 +22,7 @@ cat("STEP 1: Loading PPI network...\n")
 
 # WINDOWS FILE PATH - Update this to your actual path
 # Example: "C:/Users/YourName/Downloads/9606.protein.links.full.v12.0.txt"
-ppi_file <- "file:///C:/Users/adamb/Downloads/9606.protein.links.full.v12.0.txt/9606.protein.links.full.v12.0.txt"
+ppi_file <- ""
 
 ppi_raw <- read.table(ppi_file, header = TRUE, stringsAsFactors = FALSE)
 
@@ -84,9 +84,8 @@ clean_mem()
 cat("Final edges after cleaning:", nrow(edges), "\n\n")
 # STEP 2: Load Expression Data (68 Samples)
 cat("STEP 2: Loading expression data...\n")
-expr_file <- "C:/Users/adamb/Downloads/tpm_mat.csv"
 
-expr_data <- read.csv(expr_data <- read.csv("C:/Users/adamb/Downloads/tpm_mat.csv", header = TRUE, row.names = 1), header = TRUE, row.names = 1,
+expr_data <- read.csv(expr_data <- read.csv("", header = TRUE, row.names = 1), header = TRUE, row.names = 1,
                       stringsAsFactors = FALSE, check.names = FALSE)
 
 cat("Expression (before filtering):", nrow(expr_data), "genes x", 
