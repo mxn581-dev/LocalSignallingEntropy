@@ -1,0 +1,307 @@
+library(tidyverse)
+library(igraph)
+library(entropy)
+library(ggplot2)
+library(pheatmap)
+library(RColorBrewer)
+
+cat("=== LOCAL SIGNALING ENTROPY ANALYSIS ===\n")
+cat("Sample-specific entropy calculation for 54 samples\n\n")
+
+# Memory management
+gc(reset = TRUE)
+options(expressions = 500000)
+
+clean_mem <- function() {
+  gc(verbose = FALSE)
+  Sys.sleep(0.5)
+}
+# STEP 1: Load PPI Network with CONFIDENCE FILTERING
+
+cat("STEP 1: Loading PPI network...\n")
+
+# WINDOWS FILE PATH - Update this to your actual path
+# Example: "C:/Users/YourName/Downloads/9606.protein.links.full.v12.0.txt"
+ppi_file <- "file:///C:/Users/adamb/Downloads/9606.protein.links.full.v12.0.txt/9606.protein.links.full.v12.0.txt"
+
+ppi_raw <- read.table(ppi_file, header = TRUE, stringsAsFactors = FALSE)
+
+cat("Original network size:", nrow(ppi_raw), "edges\n")
+cat("Columns:", paste(colnames(ppi_raw), collapse = ", "), "\n\n")
+
+# Extract protein pairs and score
+edges <- data.frame(
+  from = ppi_raw[, 1],
+  to = ppi_raw[, 2],
+  score = ppi_raw$combined_score,  # Use combined_score column
+  stringsAsFactors = FALSE
+)
+
+cat("Score range:", min(edges$score, na.rm = TRUE), "-", 
+    max(edges$score, na.rm = TRUE), "\n")
+
+# CONFIDENCE FILTERING
+confidence_threshold <- 400
+
+cat("\n=== CONFIDENCE FILTERING ===\n")
+cat("Using threshold:", confidence_threshold, "\n")
+
+edges_filtered <- edges[edges$score >= confidence_threshold, ]
+
+cat("Edges before:", nrow(edges), "\n")
+cat("Edges after:", nrow(edges_filtered), "\n")
+cat("Reduction:", round(100 * (1 - nrow(edges_filtered)/nrow(edges)), 1), "%\n\n")
+
+# Increase threshold if network too large
+if (nrow(edges_filtered) > 100000) {
+  confidence_threshold <- 700
+  cat("Network large. Increasing threshold to", confidence_threshold, "\n")
+  edges_filtered <- edges[edges$score >= confidence_threshold, ]
+  cat("Edges after filtering:", nrow(edges_filtered), "\n\n")
+}
+
+if (nrow(edges_filtered) > 50000) {
+  confidence_threshold <- 900
+  cat("Network still large. Using highest confidence:", confidence_threshold, "\n")
+  edges_filtered <- edges[edges$score >= confidence_threshold, ]
+  cat("Edges after filtering:", nrow(edges_filtered), "\n\n")
+}
+
+# Keep only protein columns
+edges <- edges_filtered[, c("from", "to")]
+
+# Remove 9606. prefix
+edges$from <- gsub("^9606\\.", "", edges$from)
+edges$to <- gsub("^9606\\.", "", edges$to)
+
+# Remove duplicates and self-loops
+edges <- edges[edges$from != edges$to, ]
+edges <- unique(edges)
+
+rm(ppi_raw, edges_filtered)
+clean_mem()
+
+cat("Final edges after cleaning:", nrow(edges), "\n\n")
+# STEP 2: Load Expression Data (68 Samples)
+cat("STEP 2: Loading expression data...\n")
+expr_file <- "C:/Users/adamb/Downloads/tpm_mat.csv"
+
+expr_data <- read.csv(expr_data <- read.csv("C:/Users/adamb/Downloads/tpm_mat.csv", header = TRUE, row.names = 1), header = TRUE, row.names = 1,
+                      stringsAsFactors = FALSE, check.names = FALSE)
+
+cat("Expression (before filtering):", nrow(expr_data), "genes x", 
+    ncol(expr_data), "samples\n")
+
+# Filter to CR/PD samples only
+all_samples <- colnames(expr_data)
+cohort_samples <- all_samples
+
+if (length(cohort_samples) > 0) {
+  expr_data <- expr_data[, cohort_samples, drop = FALSE]
+  cat("Expression (after filtering):", nrow(expr_data), "genes x", 
+      ncol(expr_data), "samples\n")
+} else {
+  cat("WARNING: No CR/PD samples found. Using all samples.\n")
+}
+
+cat("Sample names:", paste(head(colnames(expr_data), 5), "..."), "\n\n")
+clean_mem()
+# STEP 3: ID Conversion (ENSP to Gene Symbols)
+
+cat("STEP 3: Converting ENSP IDs to Gene Symbols...\n")
+
+# Install biomaRt if needed
+if (!require("biomaRt", quietly = TRUE)) {
+  if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+  BiocManager::install("biomaRt", ask = FALSE)
+  library(biomaRt)
+}
+
+# Get unique ENSP IDs
+all_ensp <- unique(c(edges$from, edges$to))
+cat("Converting", length(all_ensp), "ENSP IDs...\n")
+
+# Conversion function
+convert_ensp <- function(ensp_ids, batch_size = 200) {
+  
+  library(biomaRt)
+  
+  ensembl <- tryCatch({
+    useEnsembl(biomart = "genes", dataset = "hsapiens_gene_ensembl")
+  }, error = function(e) {
+    cat("Trying mirror...\n")
+    useEnsembl(biomart = "genes", dataset = "hsapiens_gene_ensembl",
+               mirror = "useast")
+  })
+  
+  n_batches <- ceiling(length(ensp_ids) / batch_size)
+  all_results <- data.frame()
+  
+  for (i in 1:n_batches) {
+    cat(sprintf("  Batch %d/%d\r", i, n_batches))
+    
+    start <- (i - 1) * batch_size + 1
+    end <- min(i * batch_size, length(ensp_ids))
+    batch <- ensp_ids[start:end]
+    
+    result <- tryCatch({
+      getBM(attributes = c('ensembl_peptide_id', 'hgnc_symbol'),
+            filters = 'ensembl_peptide_id',
+            values = batch,
+            mart = ensembl)
+    }, error = function(e) {
+      data.frame()
+    })
+    
+    if (nrow(result) > 0) {
+      all_results <- rbind(all_results, result)
+    }
+    
+    Sys.sleep(0.3)
+  }
+  
+  cat("\n")
+  return(all_results[all_results$hgnc_symbol != "", ])
+}
+
+id_map <- convert_ensp(all_ensp, batch_size = 200)
+
+cat("Mapped:", nrow(id_map), "IDs\n")
+write.csv(id_map, "id_mapping.csv", row.names = FALSE)
+
+# Apply mapping to edges
+map_vec <- setNames(id_map$hgnc_symbol, id_map$ensembl_peptide_id)
+edges$from_symbol <- map_vec[edges$from]
+edges$to_symbol <- map_vec[edges$to]
+
+# Keep only mapped edges
+edges_mapped <- edges[!is.na(edges$from_symbol) & !is.na(edges$to_symbol), ]
+edges_mapped <- edges_mapped[, c("from_symbol", "to_symbol")]
+colnames(edges_mapped) <- c("from", "to")
+
+rm(edges, id_map, map_vec)
+clean_mem()
+
+cat("Mapped edges:", nrow(edges_mapped), "\n")
+
+# Create network
+ppi_net <- graph_from_data_frame(edges_mapped, directed = FALSE)
+ppi_net <- simplify(ppi_net)
+
+rm(edges_mapped)
+clean_mem()
+
+cat("Network:", vcount(ppi_net), "nodes,", ecount(ppi_net), "edges\n")
+
+# Check overlap with expression data
+overlap <- intersect(V(ppi_net)$name, rownames(expr_data))
+cat("Genes in both network and expression:", length(overlap), "\n\n")
+
+if (length(overlap) < 100) {
+  stop("Too few overlapping genes! Check ID conversion.")
+}
+
+# STEP 4: Calculate SAMPLE-SPECIFIC Entropy
+cat("STEP 4: Calculating SAMPLE-SPECIFIC entropy...\n")
+cat("This creates a matrix: genes x samples\n\n")
+
+calc_entropy_per_sample <- function(network, expr_matrix, genes = NULL) {
+  
+  if (is.null(genes)) {
+    genes <- intersect(V(network)$name, rownames(expr_matrix))
+  }
+  
+  n_samples <- ncol(expr_matrix)
+  sample_names <- colnames(expr_matrix)
+  
+  # Initialize results matrix
+  entropy_matrix <- matrix(NA, nrow = length(genes), ncol = n_samples)
+  rownames(entropy_matrix) <- genes
+  colnames(entropy_matrix) <- sample_names
+  
+  # Store degree info
+  degree_vec <- integer(length(genes))
+  names(degree_vec) <- genes
+  
+  for (i in seq_along(genes)) {
+    gene <- genes[i]
+    
+    if (i %% 100 == 0) cat(sprintf("  %d/%d genes\r", i, length(genes)))
+    
+    # Get neighbors
+    nbrs <- neighbors(network, gene, mode = "all")
+    if (length(nbrs) == 0) next
+    
+    nbr_names <- V(network)[nbrs]$name
+    nbr_names <- nbr_names[nbr_names %in% rownames(expr_matrix)]
+    if (length(nbr_names) == 0) next
+    
+    degree_vec[gene] <- length(nbr_names)
+    
+    # Get expression
+    gene_exp <- as.numeric(expr_matrix[gene, ])
+    nbr_exp <- expr_matrix[nbr_names, , drop = FALSE]
+    
+    # Calculate entropy FOR EACH SAMPLE
+    k <- length(nbr_names) + 1
+    max_entropy <- log2(k)
+    
+    for (s in 1:n_samples) {
+      vals <- c(gene_exp[s], as.numeric(nbr_exp[, s])) + 0.001
+      probs <- vals / sum(vals)
+      H <- entropy.empirical(probs, unit = "log2")
+      
+      # Normalize by 1/log2(k)
+      entropy_matrix[i, s] <- H / max_entropy
+    }
+  }
+  
+  cat("\n")
+  
+  # Remove genes with all NAs
+  valid_genes <- rowSums(!is.na(entropy_matrix)) > 0
+  entropy_matrix <- entropy_matrix[valid_genes, , drop = FALSE]
+  degree_vec <- degree_vec[valid_genes]
+  
+  return(list(
+    entropy_matrix = entropy_matrix,
+    degree = degree_vec
+  ))
+}
+
+# Calculate entropies
+result <- calc_entropy_per_sample(ppi_net, expr_data)
+entropy_matrix <- result$entropy_matrix
+gene_degrees <- result$degree
+
+cat("\nSample-specific entropy matrix created:\n")
+cat("Genes:", nrow(entropy_matrix), "\n")
+cat("Samples:", ncol(entropy_matrix), "\n")
+
+# Calculate summary statistics
+avg_entropy <- rowMeans(entropy_matrix, na.rm = TRUE)
+sd_entropy <- apply(entropy_matrix, 1, sd, na.rm = TRUE)
+
+baseline <- data.frame(
+  gene = rownames(entropy_matrix),
+  degree = gene_degrees[rownames(entropy_matrix)],
+  mean_entropy = avg_entropy,
+  sd_entropy = sd_entropy,
+  stringsAsFactors = FALSE
+)
+
+baseline$cv_entropy <- baseline$sd_entropy / baseline$mean_entropy
+
+cat("\nSummary (mean across samples):\n")
+print(summary(baseline$mean_entropy))
+
+# Save outputs
+write.csv(entropy_matrix, "entropy_per_sample.csv", row.names = TRUE)
+write.csv(baseline, "baseline_entropy_summary.csv", row.names = FALSE)
+
+cat("\nSaved:\n")
+cat("- entropy_per_sample.csv (genes x 54 samples)\n")
+cat("- baseline_entropy_summary.csv (summary stats)\n\n")
+
+clean_mem()
