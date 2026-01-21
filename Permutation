@@ -1,0 +1,126 @@
+cat("\nSTEP 6: Permutation test (shuffling gene labels)...\n")
+cat("Question: Is the entropy pattern real or just random?\n\n")
+
+set.seed(42)
+n_perm <- 100  # 100 permutations as requested
+
+# Test on subset of samples (testing all 68 would be very slow)
+# Or test all if you have time
+samples_to_test <- sample(colnames(expr_data), min(10, ncol(expr_data)))
+
+cat("Testing", length(samples_to_test), "samples\n")
+cat("Running", n_perm, "permutations per sample\n\n")
+
+perm_results <- list()
+
+for (s in seq_along(samples_to_test)) {
+  sample_name <- samples_to_test[s]
+  
+  cat(sprintf("\nSample %d/%d: %s\n", s, length(samples_to_test), sample_name))
+  
+  # Get real entropy for this sample
+  real_entropy <- entropy_matrix[, sample_name]
+  real_entropy <- real_entropy[!is.na(real_entropy)]
+  genes_to_test <- names(real_entropy)
+  
+  cat("Testing", length(genes_to_test), "genes\n")
+  
+  # Run permutations
+  perm_entropies <- matrix(NA, nrow = length(genes_to_test), ncol = n_perm)
+  rownames(perm_entropies) <- genes_to_test
+  
+  for (p in 1:n_perm) {
+    if (p %% 20 == 0) cat(sprintf("  Permutation %d/%d\r", p, n_perm))
+    
+    # SHUFFLE gene labels for this sample
+    perm_expr <- expr_data[genes_to_test, sample_name]
+    perm_values <- sample(perm_expr)  # Shuffle expression values
+    names(perm_values) <- genes_to_test  # Keep same gene names
+    
+    # Calculate entropy for each gene with shuffled values
+    for (g in genes_to_test) {
+      # Get neighbors
+      nbrs <- neighbors(ppi_net, g, mode = "all")
+      if (length(nbrs) == 0) next
+      
+      nbr_names <- V(ppi_net)[nbrs]$name
+      nbr_names <- nbr_names[nbr_names %in% genes_to_test]
+      if (length(nbr_names) == 0) next
+      
+      # Get expression from permuted values
+      gene_val <- perm_values[g]
+      nbr_vals <- perm_values[nbr_names]
+      
+      # Calculate entropy
+      vals <- c(gene_val, nbr_vals) + 0.001
+      probs <- vals / sum(vals)
+      H <- entropy.empirical(probs, unit = "log2")
+      
+      # Normalize
+      k <- length(nbr_names) + 1
+      perm_entropies[g, p] <- H / log2(k)
+    }
+  }
+  
+  cat("\n")
+  
+  # Calculate p-values
+  pvals <- numeric(length(genes_to_test))
+  names(pvals) <- genes_to_test
+  
+  for (g in genes_to_test) {
+    perm_dist <- perm_entropies[g, ]
+    perm_dist <- perm_dist[!is.na(perm_dist)]
+    
+    if (length(perm_dist) > 0) {
+      # Two-tailed: is real different from permuted?
+      perm_mean <- mean(perm_dist)
+      perm_sd <- sd(perm_dist)
+      
+      # Z-score approach
+      if (perm_sd > 0) {
+        z_score <- abs((real_entropy[g] - perm_mean) / perm_sd)
+        pvals[g] <- 2 * (1 - pnorm(z_score))  # two-tailed
+      }
+    }
+  }
+  
+  # Store results
+  perm_results[[sample_name]] <- data.frame(
+    gene = genes_to_test,
+    real_entropy = real_entropy[genes_to_test],
+    perm_mean = rowMeans(perm_entropies, na.rm = TRUE),
+    perm_sd = apply(perm_entropies, 1, sd, na.rm = TRUE),
+    pvalue = pvals,
+    significant = pvals < 0.05,
+    stringsAsFactors = FALSE
+  )
+  
+  clean_mem()
+}
+
+# Summarize permutation results
+perm_summary <- data.frame(
+  sample = names(perm_results),
+  n_genes = sapply(perm_results, nrow),
+  n_significant = sapply(perm_results, function(x) sum(x$significant, na.rm = TRUE)),
+  stringsAsFactors = FALSE
+)
+
+perm_summary$pct_significant <- 100 * perm_summary$n_significant / perm_summary$n_genes
+
+cat("\n\nPermutation Summary:\n")
+print(perm_summary)
+
+cat("\nInterpretation:\n")
+cat("High % significant = entropy patterns are REAL (not random)\n")
+cat("Low % significant = entropy might be random noise\n")
+
+# Combine all results
+perm_detailed <- do.call(rbind, perm_results)
+
+write.csv(perm_summary, "permutation_summary.csv", row.names = FALSE)
+write.csv(perm_detailed, "permutation_detailed.csv", row.names = FALSE)
+
+cat("\nSaved permutation results\n")
+clean_mem()
