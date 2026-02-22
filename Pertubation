@@ -1,131 +1,200 @@
-cat("\nSTEP 7: Network perturbation (add/delete edges)...\n")
-cat("Question: How much does network structure affect entropy?\n\n")
-
-set.seed(42)
-n_pert <- 100  # 100 perturbations as requested
-
-# Parameters for edge changes
-edge_change_pct <- 0.05  # Change 5% of edges each time
-
-n_edges_total <- ecount(ppi_net)
-n_edges_to_change <- round(n_edges_total * edge_change_pct)
-n_edges_to_delete <- round(n_edges_to_change / 2)
-n_edges_to_add <- round(n_edges_to_change / 2)
-
-cat("Original network:", vcount(ppi_net), "nodes,", n_edges_total, "edges\n")
-cat("Per perturbation: delete", n_edges_to_delete, "edges, add", n_edges_to_add, "edges\n\n")
-
-# Select subset of genes to track (tracking all would be too slow)
-all_valid_genes <- intersect(V(ppi_net)$name, rownames(expr_data))
-
-# Focus on genes with reasonable degree
-gene_degrees <- degree(ppi_net, v = all_valid_genes)
-genes_to_track <- names(gene_degrees[gene_degrees > 2 & gene_degrees < 100])
-genes_to_track <- sample(genes_to_track, min(500, length(genes_to_track)))
-
-cat("Tracking entropy for", length(genes_to_track), "genes\n\n")
-
-# Get baseline entropy (average across samples)
-baseline_entropy <- rowMeans(entropy_matrix[genes_to_track, ], na.rm = TRUE)
-
-# Store perturbation results
-pert_entropy_list <- vector("list", n_pert)
-
-for (p in 1:n_pert) {
-  cat(sprintf("Perturbation %d/%d\n", p, n_pert))
+run_perturbation_analysis_FAST <- function(network, expr_matrix,
+                                           original_entropy_matrix,
+                                           perturbation_rates = c(0.05, 0.10, 0.20),
+                                           n_iterations = 100,
+                                           seed = 789) {
   
-  # Get current edge list
-  edge_list <- as_edgelist(ppi_net)
-  edge_df <- as.data.frame(edge_list, stringsAsFactors = FALSE)
+  set.seed(seed)
   
-  # DELETE random edges
-  edges_to_keep <- sample(1:nrow(edge_df), nrow(edge_df) - n_edges_to_delete)
-  edge_df <- edge_df[edges_to_keep, ]
+  genes <- rownames(original_entropy_matrix)
+  genes <- genes[genes %in% V(network)$name]
   
-  # ADD random edges
-  for (i in 1:n_edges_to_add) {
-    node1 <- sample(all_valid_genes, 1)
-    node2 <- sample(all_valid_genes, 1)
+  n_samples <- ncol(expr_matrix)
+  n_genes <- length(genes)
+  original_edges <- ecount(network)
+  all_nodes <- V(network)$name
+  
+  results_list <- list()
+  
+  for (rate in perturbation_rates) {
     
-    if (node1 != node2) {
-      edge_df <- rbind(edge_df, c(node1, node2))
+    cat(sprintf("\n=== Testing %.0f%% edge perturbation ===\n", rate * 100))
+    cat(sprintf("Will modify ~%d edges (delete ~%d, add ~%d)\n",
+                round(original_edges * rate),
+                round(original_edges * rate / 2),
+                round(original_edges * rate / 2)))
+    
+    perturbed_sample_means <- matrix(NA, nrow = n_iterations, ncol = n_samples)
+    colnames(perturbed_sample_means) <- colnames(expr_matrix)
+    
+    edge_counts <- numeric(n_iterations)
+    
+    for (iter in 1:n_iterations) {
+      if (iter %% 10 == 0) cat(sprintf("  Iteration %d/%d\r", iter, n_iterations))
+      
+      # adding and removing edges from the network
+      net_pert <- network
+      
+      n_to_modify <- round(original_edges * rate)
+      n_to_delete <- round(n_to_modify / 2)
+      n_to_add <- round(n_to_modify / 2)
+      
+      # Delete random edges
+      if (n_to_delete > 0 && ecount(net_pert) > 0) {
+        edges_to_delete <- sample(1:ecount(net_pert),
+                                  min(n_to_delete, ecount(net_pert)))
+        net_pert <- delete_edges(net_pert, edges_to_delete)
+      }
+      
+      # Add random edges (batch method — faster than checking one at a time)
+      if (n_to_add > 0) {
+        new_from <- sample(all_nodes, n_to_add * 2, replace = TRUE)
+        new_to   <- sample(all_nodes, n_to_add * 2, replace = TRUE)
+        
+        # Filter out self-loops and existing edges
+        keep <- new_from != new_to
+        new_from <- new_from[keep]
+        new_to   <- new_to[keep]
+        
+        if (length(new_from) > n_to_add) {
+          new_from <- new_from[1:n_to_add]
+          new_to   <- new_to[1:n_to_add]
+        }
+        
+        if (length(new_from) > 0) {
+          edge_vec <- as.vector(rbind(new_from, new_to))
+          net_pert <- add_edges(net_pert, edge_vec)
+        }
+      }
+      
+      net_pert <- simplify(net_pert)
+      edge_counts[iter] <- ecount(net_pert)
+      
+      #Pre-compute neighbor list ONCE per iteration
+      neighbor_list <- vector("list", n_genes)
+      names(neighbor_list) <- genes
+      
+      for (i in seq_along(genes)) {
+        gene <- genes[i]
+        if (!(gene %in% V(net_pert)$name)) next
+        
+        nbrs <- neighbors(net_pert, gene, mode = "all")
+        if (length(nbrs) > 0) {
+          nbr_names <- V(net_pert)[nbrs]$name
+          nbr_names <- nbr_names[nbr_names %in% rownames(expr_matrix)]
+          if (length(nbr_names) > 0) {
+            neighbor_list[[gene]] <- nbr_names
+          }
+        }
+      }
+      
+      #Vectorized entropy calculation across all samples
+      gene_entropies <- matrix(NA, nrow = n_genes, ncol = n_samples)
+      
+      for (i in seq_along(genes)) {
+        nbr_names <- neighbor_list[[genes[i]]]
+        if (is.null(nbr_names)) next
+        
+        # Build matrix: (k x n_samples) where k = 1 (gene) + neighbors
+        vals_mat <- rbind(
+          as.numeric(expr_matrix[genes[i], ]),
+          expr_matrix[nbr_names, , drop = FALSE]
+        ) + 0.001
+        
+        # Normalize each column to probabilities
+        col_sums <- colSums(vals_mat)
+        probs_mat <- sweep(vals_mat, 2, col_sums, "/")
+        
+        # Shannon entropy per sample (vectorized)
+        H_vec <- -colSums(probs_mat * log2(probs_mat))
+        
+        # Normalize by max entropy
+        k <- nrow(vals_mat)
+        gene_entropies[i, ] <- H_vec / log2(k)
+      }
+      
+      # Mean entropy across genes for each sample
+      perturbed_sample_means[iter, ] <- colMeans(gene_entropies, na.rm = TRUE)
     }
+    
+    cat("\n")
+    
+    #Calculate statistics
+    original_sample_means <- colMeans(original_entropy_matrix[genes, ], na.rm = TRUE)
+    
+    cv_per_sample <- apply(perturbed_sample_means, 2, sd, na.rm = TRUE) /
+                     colMeans(perturbed_sample_means, na.rm = TRUE)
+    
+    overall_cv <- mean(cv_per_sample, na.rm = TRUE)
+    
+    #How much did entropy shift from the original?
+    mean_shift <- mean(colMeans(perturbed_sample_means, na.rm = TRUE) - original_sample_means)
+    
+    cat(sprintf("  Overall CV: %.4f (%.2f%%)\n", overall_cv, overall_cv * 100))
+    cat(sprintf("  Mean edges: %.0f (original: %d, change: %+.1f%%)\n",
+                mean(edge_counts), original_edges,
+                100 * (mean(edge_counts) - original_edges) / original_edges))
+    cat(sprintf("  Mean entropy shift from original: %+.4f\n", mean_shift))
+    
+    #Robustness interpretation
+    if (overall_cv < 0.01) {
+      cat("  -> VERY ROBUST: Entropy barely changes with network perturbation\n")
+    } else if (overall_cv < 0.05) {
+      cat("  -> ROBUST: Entropy is stable under network perturbation\n")
+    } else if (overall_cv < 0.10) {
+      cat("  -> MODERATE: Entropy shows some sensitivity to network structure\n")
+    } else {
+      cat("  -> SENSITIVE: Entropy is strongly affected by network topology\n")
+    }
+    
+    results_list[[paste0("rate_", rate)]] <- list(
+      perturbation_rate = rate,
+      perturbed_means = perturbed_sample_means,
+      original_means = original_sample_means,
+      cv_per_sample = cv_per_sample,
+      overall_cv = overall_cv,
+      mean_shift = mean_shift,
+      edge_counts = edge_counts
+    )
   }
   
-  # Create perturbed network
-  pert_net <- graph_from_data_frame(edge_df, directed = FALSE)
-  pert_net <- simplify(pert_net)
-  
-  # Calculate entropy on perturbed network
-  pert_result <- calc_entropy_per_sample(pert_net, expr_data, genes = genes_to_track)
-  
-  # Average across samples
-  pert_mean_entropy <- rowMeans(pert_result$entropy_matrix, na.rm = TRUE)
-  
-  pert_entropy_list[[p]] <- pert_mean_entropy
-  
-  rm(pert_net, edge_df, pert_result)
-  clean_mem()
-}
-
-# Analyze perturbation results
-cat("\nAnalyzing perturbation results...\n")
-
-# Get genes present in all perturbations
-common_pert_genes <- Reduce(intersect, lapply(pert_entropy_list, names))
-cat("Genes in all perturbations:", length(common_pert_genes), "\n")
-
-if (length(common_pert_genes) > 0) {
-  # Create matrix: genes x perturbations
-  pert_matrix <- matrix(NA, nrow = length(common_pert_genes), ncol = n_pert)
-  rownames(pert_matrix) <- common_pert_genes
-  
-  for (p in 1:n_pert) {
-    pert_matrix[, p] <- pert_entropy_list[[p]][common_pert_genes]
+  cat("\n===== PERTURBATION SUMMARY =====\n")
+  for (rate_name in names(results_list)) {
+    r <- results_list[[rate_name]]
+    cat(sprintf("  %s: CV = %.4f (%.2f%%), shift = %+.4f\n",
+                rate_name, r$overall_cv, r$overall_cv * 100, r$mean_shift))
   }
+  cat("================================\n\n")
   
-  # Calculate variability and change from baseline
-  pert_summary <- data.frame(
-    gene = common_pert_genes,
-    baseline = baseline_entropy[common_pert_genes],
-    pert_mean = rowMeans(pert_matrix, na.rm = TRUE),
-    pert_sd = apply(pert_matrix, 1, sd, na.rm = TRUE),
-    pert_min = apply(pert_matrix, 1, min, na.rm = TRUE),
-    pert_max = apply(pert_matrix, 1, max, na.rm = TRUE),
-    stringsAsFactors = FALSE
-  )
-  
-  pert_summary$change <- pert_summary$pert_mean - pert_summary$baseline
-  pert_summary$abs_change <- abs(pert_summary$change)
-  pert_summary$cv <- pert_summary$pert_sd / pert_summary$pert_mean
-  
-  cat("\nPerturbation variability (CV) summary:\n")
-  cat("Low CV (<0.1) = entropy robust to network changes\n")
-  cat("High CV (>0.2) = entropy sensitive to network structure\n\n")
-  print(summary(pert_summary$cv))
-  
-  cat("\nChange from baseline:\n")
-  print(summary(pert_summary$change))
-  
-  cat("\nGenes most SENSITIVE to network changes:\n")
-  sensitive <- pert_summary %>%
-    arrange(desc(abs_change)) %>%
-    head(20)
-  print(sensitive[, c("gene", "baseline", "pert_mean", "change", "cv")])
-  
-  cat("\nGenes most ROBUST to network changes:\n")
-  robust <- pert_summary %>%
-    arrange(abs_change) %>%
-    head(20)
-  print(robust[, c("gene", "baseline", "pert_mean", "change", "cv")])
-  
-  # Overall assessment
-  pct_stable <- 100 * sum(abs(pert_summary$change) < 0.05, na.rm = TRUE) / nrow(pert_summary)
-  cat(sprintf("\nOverall stability: %.1f%% of genes have |change| < 0.05\n", pct_stable))
-  
-  write.csv(pert_summary, "perturbation_summary.csv", row.names = FALSE)
-  write.csv(pert_matrix, "perturbation_full_matrix.csv", row.names = TRUE)
+  return(results_list)
 }
 
-rm(pert_entropy_list, pert_matrix)
-clean_mem()
+
+#Running the script
+
+perturb_results <- run_perturbation_analysis_FAST(
+  network = ppi_net,
+  expr_matrix = expr_data,
+  original_entropy_matrix = entropy_matrix,
+  perturbation_rates = c(0.05, 0.10, 0.20),
+  n_iterations = 100
+)
+
+#Exporting the CSV files
+
+for (rate_name in names(perturb_results)) {
+  result <- perturb_results[[rate_name]]
+  
+  write.csv(result$perturbed_means,
+            paste0("perturbation_", rate_name, "_means.csv"),
+            row.names = FALSE)
+  
+  write.csv(data.frame(
+    sample = colnames(expr_data),
+    cv = result$cv_per_sample,
+    original_mean = result$original_means,
+    perturbed_mean = colMeans(result$perturbed_means, na.rm = TRUE)
+  ), paste0("perturbation_", rate_name, "_summary.csv"), row.names = FALSE)
+}
+
+cat("All CSVs exported.\n")
