@@ -5,8 +5,6 @@ library(ggplot2)
 library(pheatmap)
 library(RColorBrewer)
 
-cat("=== LOCAL SIGNALING ENTROPY ANALYSIS ===\n")
-cat("Sample-specific entropy calculation for 54 samples\n\n")
 
 # Memory management
 gc(reset = TRUE)
