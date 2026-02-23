@@ -66,8 +66,7 @@ The pipeline follows Teschendorff et al. (Methods 2014; Nat Commun 2017):
 | `SR_per_sample.csv` | Global entropy rate per sample |
 | `gene_entropy_summary_corrected.csv` | Per-gene stats (degree, mean entropy, stationary distribution weight) |
 | `permutation_corrected_summary.csv` | Permutation z-scores and p-values per sample |
-| `perturbation_corrected_rate_*_summary.csv` | Perturbation CV and shift per sample at each rate |
-| `bootstrap_cv_per_sample.csv` | Bootstrap coefficient of variation per sample |
+
 
 ---
 
@@ -86,9 +85,6 @@ source("bootstrap.R")
 # 4. Permutation + perturbation (uses adj_m, maxSR, expr_corrected, SR_per_sample)
 source("permutation_perturbation_corrected.R")
 
-# 5. Visualizations
-source("entropy_heatmaps.R")
-source("permutation_visualizations.R")
 ```
 
 ---
