@@ -2,7 +2,7 @@
 
 Network-based signaling entropy rate (SR) computation for in-house osteosarcoma cancer cell lines, following the Teschendorff framework (SCENT). This project integrates transcriptomic data (TPM) with the STRING protein-protein interaction (PPI) network to quantify signaling promiscuity across 68 osteosarcoma samples.
 
-Collaboration between the [Jacob Scott Lab](https://sites.google.com/site/jacobgscott/) at Cleveland Clinic Lerner Research Institute and Case Western Reserve University.
+Collaboration with the [Jacob Scott Lab]([https://sites.google.com/site/jacobgscott/](https://theorydi.vision/)) at Cleveland Clinic Lerner Research Institute.
 
 ---
 
