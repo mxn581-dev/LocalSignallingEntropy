@@ -69,17 +69,18 @@ The pipeline follows Teschendorff et al. (Methods 2014; Nat Commun 2017):
 ## Run Order
 
 ```r
-# 1. Load PPI, expression data, convert IDs
-source("entropy_matrix.R")
+# 1. Load PPI, expression data, convert IDs and then compute local signaling entropy.
+source("entropy_matrix_corrected.R")
 
-# 2. Compute corrected entropy rate
-source("entropy_corrected.R")
-
-# 3. Bootstrap (uses entropy_matrix_corrected)
+# 2. Bootstrap (uses entropy_matrix_corrected)
 source("bootstrap.R")
 
-# 4. Permutation + perturbation (uses adj_m, maxSR, expr_corrected, SR_per_sample)
-source("permutation_perturbation_corrected.R")
+# 3. Permutation
+source("permutation_corrected.R")
+
+# 4. Perturbation
+source("perturbation_corrected.R")
+
 
 ```
 
