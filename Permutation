@@ -1,102 +1,88 @@
-run_permutation_analysis_FAST <- function(network, expr_matrix, 
-                                         original_entropy_matrix,
-                                         n_permutations = 100,
-                                         seed = 456) {
+compute_SR_one_sample <- function(exp_v, adj_m, maxSR) {
   
-  set.seed(seed)
+  n <- length(exp_v)
   
-  genes <- rownames(original_entropy_matrix)
-  genes <- genes[genes %in% V(network)$name]
+  # Mass action: sumexp_i = sum_j A_ij * x_j
+  sumexp_v <- as.vector(adj_m %*% matrix(exp_v, ncol = 1))
   
-  n_samples <- ncol(expr_matrix)
-  n_genes <- length(genes)
+  # Stationary distribution: pi_i = x_i * sumexp_i / norm
+  invP_v <- exp_v * sumexp_v
+  nf <- sum(invP_v)
   
-  # Pre-compute neighbor information ONCE
-  cat("Pre-computing network neighborhoods...\n")
-  neighbor_list <- vector("list", n_genes)
-  names(neighbor_list) <- genes
+  if (nf == 0) return(list(SR = NA, local_S = rep(NA, n)))
   
-  for (i in seq_along(genes)) {
-    gene <- genes[i]
-    nbrs <- neighbors(network, gene, mode = "all")
-    if (length(nbrs) > 0) {
-      nbr_names <- V(network)[nbrs]$name
-      nbr_names <- nbr_names[nbr_names %in% rownames(expr_matrix)]
-      if (length(nbr_names) > 0) {
-        neighbor_list[[gene]] <- nbr_names
-      }
-    }
+  invP_v <- invP_v / nf
+  
+  # Stochastic matrix: p_ij = A_ij * x_j / sumexp_i
+  safe_sumexp <- sumexp_v
+  safe_sumexp[safe_sumexp == 0] <- 1
+  p_m <- t(t(adj_m) * exp_v) / safe_sumexp
+  
+  # Local entropy: S_i = -sum_j p_ij * log(p_ij)
+  # Vectorized using rowSums
+  log_p <- matrix(0, nrow = nrow(p_m), ncol = ncol(p_m))
+  nonzero <- p_m > 0
+  log_p[nonzero] <- log(p_m[nonzero])
+  S_v <- -rowSums(p_m * log_p)
+  
+  # Entropy rate: SR = sum(pi_i * S_i) / maxSR
+  SR <- sum(invP_v * S_v) / maxSR
+  
+  return(list(SR = SR, local_S = S_v))
+}
+
+
+compute_SR_all_samples <- function(expr_sub, adj_m, maxSR) {
+  
+  n_samples <- ncol(expr_sub)
+  SR_vec <- numeric(n_samples)
+  
+  for (s in 1:n_samples) {
+    exp_v <- as.numeric(expr_sub[, s])
+    result <- compute_SR_one_sample(exp_v, adj_m, maxSR)
+    SR_vec[s] <- result$SR
   }
   
-  # Remove genes with no neighbors
-  valid_genes <- !sapply(neighbor_list, is.null)
-  genes <- genes[valid_genes]
-  neighbor_list <- neighbor_list[valid_genes]
-  n_genes <- length(genes)
+  return(SR_vec)
+}
+
+
+run_permutation_corrected <- function(adj_m, expr_sub, maxSR,
+                                      original_SR,
+                                      n_permutations = 100,
+                                      seed = 456) {
+  set.seed(seed)
   
-  cat("Valid genes with neighbors:", n_genes, "\n")
+  n_samples <- ncol(expr_sub)
+  n_genes <- nrow(expr_sub)
   
-  # Store results
-  permuted_sample_means <- matrix(NA, nrow = n_permutations, ncol = n_samples)
-  colnames(permuted_sample_means) <- colnames(expr_matrix)
+  permuted_SR <- matrix(NA, nrow = n_permutations, ncol = n_samples)
+  colnames(permuted_SR) <- colnames(expr_sub)
   
-  cat("\nRunning", n_permutations, "permutation iterations...\n")
-  cat("Shuffling expression values within each sample\n\n")
+  cat("Running", n_permutations, "permutations (corrected SR)...\n")
   
-  # Main permutation loop
   for (perm in 1:n_permutations) {
+    if (perm %% 10 == 0) cat(sprintf("  Permutation %d/%d\r", perm, n_permutations))
     
-    cat(sprintf("  Permutation %d/%d\r", perm, n_permutations))
-    
-    # Create permuted expression matrix
-    expr_permuted <- expr_matrix
-    
-    # Shuffle each column (sample) independently
+    # Shuffle expression within each sample column
+    expr_permuted <- expr_sub
     for (s in 1:n_samples) {
-      expr_permuted[, s] <- sample(expr_matrix[, s])
+      expr_permuted[, s] <- sample(expr_sub[, s])
     }
     
-    # Calculate entropy for this permutation
-    gene_entropies <- matrix(NA, nrow = n_genes, ncol = n_samples)
-    
-    for (i in seq_along(genes)) {
-      gene <- genes[i]
-      nbr_names <- neighbor_list[[gene]]
-      
-      if (is.null(nbr_names)) next
-      
-      # Get expression values
-      gene_exp <- expr_permuted[gene, ]
-      nbr_exp <- expr_permuted[nbr_names, , drop = FALSE]
-      
-      k <- length(nbr_names) + 1
-      max_entropy <- log2(k)
-      
-      # Vectorized entropy calculation across all samples
-      for (s in 1:n_samples) {
-        vals <- c(gene_exp[s], nbr_exp[, s]) + 0.001
-        probs <- vals / sum(vals)
-        H <- entropy.empirical(probs, unit = "log2")
-        gene_entropies[i, s] <- H / max_entropy
-      }
-    }
-    
-    # Calculate mean across genes for each sample
-    permuted_sample_means[perm, ] <- colMeans(gene_entropies, na.rm = TRUE)
+    # Compute SR for all samples with permuted data
+    permuted_SR[perm, ] <- compute_SR_all_samples(expr_permuted, adj_m, maxSR)
   }
   
   cat("\n\n")
   
-  # Calculate statistics
-  original_sample_means <- colMeans(original_entropy_matrix[genes, ], na.rm = TRUE)
-  
-  # For each sample, calculate empirical p-value
+  # Statistics
   p_values <- numeric(n_samples)
   z_scores <- numeric(n_samples)
   
   for (s in 1:n_samples) {
-    perm_dist <- permuted_sample_means[, s]
-    obs_val <- original_sample_means[s]
+    perm_dist <- permuted_SR[, s]
+    obs_val <- original_SR[s]
     
     # Two-tailed p-value
     p_values[s] <- mean(abs(perm_dist - mean(perm_dist)) >= abs(obs_val - mean(perm_dist)))
@@ -105,199 +91,29 @@ run_permutation_analysis_FAST <- function(network, expr_matrix,
     z_scores[s] <- (obs_val - mean(perm_dist)) / sd(perm_dist)
   }
   
-  cat("Permutation Results:\n")
-  cat(sprintf("  Samples with significant entropy (p < 0.05): %d / %d (%.1f%%)\n",
-              sum(p_values < 0.05), n_samples, 
+  cat("=== PERMUTATION RESULTS (Corrected SR) ===\n")
+  cat(sprintf("  Samples with p < 0.05: %d / %d (%.1f%%)\n",
+              sum(p_values < 0.05), n_samples,
               100 * sum(p_values < 0.05) / n_samples))
   cat(sprintf("  Mean |Z-score|: %.3f\n", mean(abs(z_scores))))
   cat(sprintf("  Z-score range: %.3f to %.3f\n", min(z_scores), max(z_scores)))
+  cat(sprintf("  Observed SR mean: %.4f\n", mean(original_SR)))
+  cat(sprintf("  Permuted SR mean: %.4f\n\n", mean(colMeans(permuted_SR, na.rm = TRUE))))
   
-  # Interpretation
   if (mean(p_values < 0.05) > 0.8) {
-    cat("\n  HIGHLY SIGNIFICANT: Observed entropy is very different from random\n")
-    cat("    Network structure provides meaningful information\n\n")
+    cat("  -> HIGHLY SIGNIFICANT: Network captures real biological signal\n\n")
   } else if (mean(p_values < 0.05) > 0.5) {
-    cat("\n  MODERATELY SIGNIFICANT: Some structure detected\n")
-    cat("    Network provides some information but may be noisy\n\n")
+    cat("  -> MODERATELY SIGNIFICANT\n\n")
   } else {
-    cat("\n  NOT SIGNIFICANT: Observed entropy is not different from random\n")
-    cat("    Network may not provide meaningful biological signal\n\n")
+    cat("  -> NOT SIGNIFICANT\n\n")
   }
   
   results <- list(
-    permuted_means = permuted_sample_means,
-    original_means = original_sample_means,
+    permuted_means = permuted_SR,
+    original_means = original_SR,
     p_values = p_values,
     z_scores = z_scores
   )
   
   return(results)
 }
-
-
-run_permutation_analysis_PARALLEL <- function(network, expr_matrix, 
-                                             original_entropy_matrix,
-                                             n_permutations = 100,
-                                             n_cores = 4,
-                                             seed = 456) {
-  
-  # Load parallel libraries
-  library(parallel)
-  library(doParallel)
-  library(foreach)
-  
-  set.seed(seed)
-  
-  genes <- rownames(original_entropy_matrix)
-  genes <- genes[genes %in% V(network)$name]
-  
-  n_samples <- ncol(expr_matrix)
-  n_genes <- length(genes)
-  
-  # Pre-compute neighbor information
-  cat("Pre-computing network neighborhoods...\n")
-  neighbor_list <- vector("list", n_genes)
-  names(neighbor_list) <- genes
-  
-  for (i in seq_along(genes)) {
-    gene <- genes[i]
-    nbrs <- neighbors(network, gene, mode = "all")
-    if (length(nbrs) > 0) {
-      nbr_names <- V(network)[nbrs]$name
-      nbr_names <- nbr_names[nbr_names %in% rownames(expr_matrix)]
-      if (length(nbr_names) > 0) {
-        neighbor_list[[gene]] <- nbr_names
-      }
-    }
-  }
-  
-  # Remove genes with no neighbors
-  valid_genes <- !sapply(neighbor_list, is.null)
-  genes <- genes[valid_genes]
-  neighbor_list <- neighbor_list[valid_genes]
-  n_genes <- length(genes)
-  
-  cat("Valid genes with neighbors:", n_genes, "\n")
-  
-  # Set up parallel backend
-  cl <- makeCluster(n_cores)
-  registerDoParallel(cl)
-  
-  cat("\nRunning", n_permutations, "permutations in parallel on", n_cores, "cores...\n\n")
-  
-  # Parallel permutation loop
-  permuted_results <- foreach(perm = 1:n_permutations, 
-                               .combine = rbind,
-                               .packages = c("entropy")) %dopar% {
-    
-    # Create permuted expression matrix
-    expr_permuted <- expr_matrix
-    set.seed(seed + perm)  # Different seed for each permutation
-    
-    for (s in 1:n_samples) {
-      expr_permuted[, s] <- sample(expr_matrix[, s])
-    }
-    
-    # Calculate entropy
-    gene_entropies <- matrix(NA, nrow = n_genes, ncol = n_samples)
-    
-    for (i in seq_along(genes)) {
-      gene <- genes[i]
-      nbr_names <- neighbor_list[[gene]]
-      
-      if (is.null(nbr_names)) next
-      
-      gene_exp <- expr_permuted[gene, ]
-      nbr_exp <- expr_permuted[nbr_names, , drop = FALSE]
-      
-      k <- length(nbr_names) + 1
-      max_entropy <- log2(k)
-      
-      for (s in 1:n_samples) {
-        vals <- c(gene_exp[s], nbr_exp[, s]) + 0.001
-        probs <- vals / sum(vals)
-        H <- entropy.empirical(probs, unit = "log2")
-        gene_entropies[i, s] <- H / max_entropy
-      }
-    }
-    
-    # Return mean for this permutation
-    colMeans(gene_entropies, na.rm = TRUE)
-  }
-  
-  stopCluster(cl)
-  
-  # Convert to matrix
-  permuted_sample_means <- as.matrix(permuted_results)
-  colnames(permuted_sample_means) <- colnames(expr_matrix)
-  
-  cat("\n")
-  
-  # Calculate statistics
-  original_sample_means <- colMeans(original_entropy_matrix[genes, ], na.rm = TRUE)
-  
-  p_values <- numeric(n_samples)
-  z_scores <- numeric(n_samples)
-  
-  for (s in 1:n_samples) {
-    perm_dist <- permuted_sample_means[, s]
-    obs_val <- original_sample_means[s]
-    
-    p_values[s] <- mean(abs(perm_dist - mean(perm_dist)) >= abs(obs_val - mean(perm_dist)))
-    z_scores[s] <- (obs_val - mean(perm_dist)) / sd(perm_dist)
-  }
-  
-  cat("Permutation Results:\n")
-  cat(sprintf("  Samples with significant entropy (p < 0.05): %d / %d (%.1f%%)\n",
-              sum(p_values < 0.05), n_samples, 
-              100 * sum(p_values < 0.05) / n_samples))
-  cat(sprintf("  Mean |Z-score|: %.3f\n", mean(abs(z_scores))))
-  cat(sprintf("  Z-score range: %.3f to %.3f\n", min(z_scores), max(z_scores)))
-  
-  if (mean(p_values < 0.05) > 0.8) {
-    cat("\n  ✓ HIGHLY SIGNIFICANT\n\n")
-  } else if (mean(p_values < 0.05) > 0.5) {
-    cat("\n  ⚠ MODERATELY SIGNIFICANT\n\n")
-  } else {
-    cat("\n  ✗ NOT SIGNIFICANT\n\n")
-  }
-  
-  results <- list(
-    permuted_means = permuted_sample_means,
-    original_means = original_sample_means,
-    p_values = p_values,
-    z_scores = z_scores
-  )
-  
-  return(results)
-}
-run_permutation_TEST <- function(network, expr_matrix, 
-                                original_entropy_matrix,
-                                n_permutations = 10) {
-  
-  cat("TEST MODE: Running only", n_permutations, "permutations\n\n")
-  
-  result <- run_permutation_analysis_FAST(
-    network = network,
-    expr_matrix = expr_matrix,
-    original_entropy_matrix = original_entropy_matrix,
-    n_permutations = 100,
-    seed = 456
-  )
-  
-  return(result)
-}
-# Convert expr_data to numeric matrix
-expr_data <- as.matrix(expr_data)
-storage.mode(expr_data) <- "numeric"
-
-# Verify it worked
-class(expr_data)  # Should say "matrix" "array"
-typeof(expr_data[1,1])  # Should say "double"
-
-test_perm <- run_permutation_TEST(
-  network = ppi_net,
-  expr_matrix = expr_data,
-  original_entropy_matrix = entropy_matrix,
-  n_permutations = 10
-)
