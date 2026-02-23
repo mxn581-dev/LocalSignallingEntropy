@@ -42,7 +42,7 @@ bootstrap_entropy <- function(entropy_mat, n_bootstrap = 100, seed = 123) {
 }
 
 # Run bootstrap
-boot_results <- bootstrap_entropy(entropy_matrix, n_bootstrap = 100)
+boot_results <- bootstrap_entropy(entropy_matrix_corrected, n_bootstrap = 100)
 
 cat("Bootstrap Results:\n")
 cat("Overall CV across samples:", round(boot_results$overall_cv, 4), "\n")
