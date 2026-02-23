@@ -23,6 +23,7 @@ The pipeline follows Teschendorff et al. (Methods 2014; Nat Commun 2017):
    ```
    p_ij = A_ij * x_j / Σ_k (A_ik * x_k)
    ```
+<img width="1125" height="728" alt="Screenshot 2026-02-23 at 16-56-11 Signaling Entropy Rate — Methodology" src="https://github.com/user-attachments/assets/0fa7bb61-63fb-4a36-9916-7251e908a94b" />
 
    where A is the binary adjacency matrix. This yields a row-stochastic matrix **P** describing the probability of signaling flow from gene *i* to gene *j*.
 
@@ -31,11 +32,13 @@ The pipeline follows Teschendorff et al. (Methods 2014; Nat Commun 2017):
    ```
    π_i = x_i * Σ_j(A_ij * x_j) / normalization
    ```
+<img width="1125" height="655" alt="Screenshot 2026-02-23 at 16-56-46 Signaling Entropy Rate — Methodology" src="https://github.com/user-attachments/assets/3880c564-b490-4d4a-a58e-ecf4830ca2f1" />
 
 5. **Local and global entropy**:
    - Local entropy per gene: `S_i = -Σ_j p_ij * log(p_ij)`
    - Global entropy rate: `SR = Σ_i π_i * S_i`
    - Normalized: `SR_norm = SR / maxSR`, where `maxSR = log(λ_max)` and `λ_max` is the largest eigenvalue of the adjacency matrix.
+<img width="1125" height="841" alt="Screenshot 2026-02-23 at 16-56-59 Signaling Entropy Rate — Methodology" src="https://github.com/user-attachments/assets/c52b52ca-bb3f-447c-b61e-a702968cf88a" />
 
 ### Robustness Validation
 
@@ -49,14 +52,7 @@ The pipeline follows Teschendorff et al. (Methods 2014; Nat Commun 2017):
 
 ## File Structure
 
-```
-├── entropy_matrix.R                        # Steps 1-3: PPI loading, expression loading, ID conversion
-├── entropy_corrected.R                     # Step 4: Corrected SR computation (mass action + entropy rate)
-├── bootstrap.R                             # Bootstrap robustness analysis
-├── permutation_perturbation_corrected.R    # Corrected permutation & perturbation analyses
-├── entropy_heatmaps.R                      # Heatmap visualizations
-├── permutation_visualizations.R            # Permutation result plots
-```
+<img width="1125" height="1100" alt="Screenshot 2026-02-23 at 16-57-32 Signaling Entropy Rate — Methodology" src="https://github.com/user-attachments/assets/16d89b89-1529-40eb-9832-c506ea0c81c1" />
 
 ### Key Outputs
 
